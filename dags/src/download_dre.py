@@ -1,33 +1,18 @@
 from pathlib import Path
-from datetime import datetime, timezone
 import hashlib
 import json
-
+import asyncio
+import sys
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
+from concurrent.futures import ThreadPoolExecutor
 
-
-# ---------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------
-
-HTML_URL = (
-    "https://diariodarepublica.pt/dr/detalhe/"
-    "decreto-lei/125-2025-962603401"
-)
-
-PDF_URL = (
-    "https://files.diariodarepublica.pt/"
-    "1s/2025/12/23400/0000400068.pdf"
-)
-
-OUTPUT_DIR = Path("data/raw/PT-DL-125-2025")
 
 HEADERS = {
     "User-Agent": (
-        "RegulatoryDataPoC/0.1 "
-        "(educational regulatory data ingestion project)"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36"
     )
 }
 
@@ -37,22 +22,11 @@ HEADERS = {
 # ---------------------------------------------------------
 
 def calculate_sha256(content: bytes) -> str:
-    """
-    Calculate SHA256 hash of content.
-
-    Useful for detecting changes between different
-    versions of the same document.
-    """
     return hashlib.sha256(content).hexdigest()
 
 
 def download(url: str) -> requests.Response:
-    """
-    Generic HTTP download function.
 
-    Used for resources that do not require JavaScript,
-    such as the PDF.
-    """
     response = requests.get(
         url,
         headers=HEADERS,
@@ -68,19 +42,15 @@ def download(url: str) -> requests.Response:
 # HTML - PLAYWRIGHT
 # ---------------------------------------------------------
 
-def download_html():
-    """
-    Download the rendered HTML using Playwright.
+def download_html(
+    html_url: str,
+    output_dir: Path
+):
 
-    The Diário da República website is built with
-    React / OutSystems, so a normal requests.get()
-    only returns the initial application shell.
-
-    Playwright launches a browser and executes the
-    JavaScript before retrieving the HTML.
-    """
-
-    print("Downloading and rendering HTML with Playwright...")
+    print(
+        "Downloading and rendering HTML "
+        "with Playwright..."
+    )
 
     with sync_playwright() as p:
 
@@ -91,84 +61,133 @@ def download_html():
         page = browser.new_page()
 
         page.goto(
-            HTML_URL,
+            html_url,
             wait_until="domcontentloaded",
             timeout=60_000
         )
 
-        # Wait until actual document content is rendered.
-        page.get_by_text(
-            "Decreto-Lei n.º 125/2025",
-            exact=False
-        ).first.wait_for(
+        page.wait_for_function(
+            """
+            () => {
+                const container =
+                    document.querySelector(
+                        '#reactContainer'
+                    );
+
+                return container &&
+                       container.innerText.length > 500;
+            }
+            """,
             timeout=60_000
         )
 
-        print("Page successfully rendered.")
-
-        # HTML after JavaScript execution
         html = page.content()
 
         browser.close()
 
-    # Convert string to bytes so we can calculate
-    # the SHA256 consistently.
-    html_bytes = html.encode("utf-8")
+    html_bytes = html.encode(
+        "utf-8"
+    )
 
-    output_file = OUTPUT_DIR / "original.html"
+    output_path = (
+        output_dir /
+        "original.html"
+    )
 
-    output_file.write_text(
+    output_path.write_text(
         html,
         encoding="utf-8"
     )
 
-    print(f"HTML saved to: {output_file}")
+    print(
+        f"HTML saved to: {output_path}"
+    )
 
     return {
-        "url": HTML_URL,
+        "url": html_url,
         "extraction_method": "playwright",
         "size_bytes": len(html_bytes),
-        "sha256": calculate_sha256(html_bytes)
+        "sha256": calculate_sha256(
+            html_bytes
+        )
     }
 
 
+def run_download_html(
+    html_url: str,
+    output_dir: Path
+):
+    """
+    Runs Playwright in a separate thread.
+
+    On Windows, Playwright requires a ProactorEventLoop
+    because it launches the browser as a subprocess.
+    """
+
+    if sys.platform.startswith("win"):
+        asyncio.set_event_loop_policy(
+            asyncio.WindowsProactorEventLoopPolicy()
+        )
+
+    with ThreadPoolExecutor(
+        max_workers=1
+    ) as executor:
+
+        future = executor.submit(
+            download_html,
+            html_url,
+            output_dir
+        )
+
+        return future.result()
+
+
 # ---------------------------------------------------------
-# PDF - REQUESTS
+# PDF
 # ---------------------------------------------------------
 
-def download_pdf():
-    """
-    Download the official PDF.
-
-    The PDF is a static resource, so browser automation
-    is unnecessary. A normal HTTP request is preferable.
-    """
+def download_pdf(
+    pdf_url: str,
+    output_dir: Path
+):
 
     print("Downloading PDF...")
 
-    response = download(PDF_URL)
+    response = download(
+        pdf_url
+    )
 
     pdf = response.content
 
-    # Basic validation:
-    # PDF files should start with the PDF signature.
     if not pdf.startswith(b"%PDF"):
         raise ValueError(
-            "Downloaded content does not appear to be a PDF."
+            "Downloaded content does not "
+            "appear to be a PDF."
         )
 
-    output_file = OUTPUT_DIR / "original.pdf"
+    output_file = (
+        output_dir /
+        "original.pdf"
+    )
 
-    output_file.write_bytes(pdf)
+    output_file.write_bytes(
+        pdf
+    )
 
-    print(f"PDF saved to: {output_file}")
+    print(
+        f"PDF saved to: {output_file}"
+    )
 
     return {
-        "url": PDF_URL,
+        "url": pdf_url,
         "extraction_method": "requests",
-        "content_type": response.headers.get("Content-Type"),
+        "content_type":
+            response.headers.get(
+                "Content-Type"
+            ),
         "size_bytes": len(pdf),
-        "sha256": calculate_sha256(pdf)
+        "sha256":
+            calculate_sha256(pdf)
     }
 
 
@@ -176,13 +195,14 @@ def download_pdf():
 # HTML INSPECTION
 # ---------------------------------------------------------
 
-def inspect_html():
-    """
-    Small test to verify that the rendered HTML
-    actually contains the document content.
-    """
+def inspect_html(
+    output_dir: Path
+):
 
-    html_file = OUTPUT_DIR / "original.html"
+    html_file = (
+        output_dir /
+        "original.html"
+    )
 
     html = html_file.read_text(
         encoding="utf-8",
@@ -194,8 +214,8 @@ def inspect_html():
         "html.parser"
     )
 
-    # Print page title
     if soup.title:
+
         print(
             "HTML page title:",
             soup.title.get_text(
@@ -204,7 +224,6 @@ def inspect_html():
             )
         )
 
-    # Print a sample of the rendered text
     body = soup.find("body")
 
     if body:
@@ -214,72 +233,77 @@ def inspect_html():
             strip=True
         )
 
-        print("\n--- HTML CONTENT SAMPLE ---\n")
+        print(
+            "\n--- HTML CONTENT SAMPLE ---\n"
+        )
 
-        print(text[:1500])
+        print(
+            text[:1500]
+        )
 
-        print("\n---------------------------\n")
+        print(
+            "\n---------------------------\n"
+        )
 
 
 # ---------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------
 
-def main():
+def main_dre(
+    HTML_URL,
+    PDF_URL,
+    OUTPUT_DIR
+):
 
     OUTPUT_DIR.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    # Dynamic HTML
-    html_metadata = download_html()
+    # HTML
+    html_metadata = (
+        run_download_html(
+            HTML_URL,
+            OUTPUT_DIR
+        )
+    )
 
-    # Static PDF
-    pdf_metadata = download_pdf()
+    # PDF
+    pdf_metadata = None
+
+    if PDF_URL:
+
+        pdf_metadata = download_pdf(
+            PDF_URL,
+            OUTPUT_DIR
+        )
 
     metadata = {
-
-        "document_id": "PT-DL-125-2025",
-
-        "source": "Diário da República",
-
-        "jurisdiction": "PT",
-
-        "document_type": "Decreto-Lei",
-
-        "document_number": "125/2025",
-
-        "retrieved_at": datetime.now(
-            timezone.utc
-        ).isoformat(),
-
         "html": html_metadata,
-
         "pdf": pdf_metadata
     }
 
-    metadata_file = (
+    metadata_path = (
         OUTPUT_DIR /
         "metadata.json"
     )
 
-    metadata_file.write_text(
+    metadata_path.write_text(
         json.dumps(
             metadata,
-            indent=2,
-            ensure_ascii=False
+            ensure_ascii=False,
+            indent=2
         ),
         encoding="utf-8"
     )
 
-    inspect_html()
-
-    print(
-        f"Metadata saved to: "
-        f"{metadata_file}"
+    inspect_html(
+        OUTPUT_DIR
     )
 
+    print(
+        "Download completed."
+    )
 
-if __name__ == "__main__":
-    main()
+    return metadata

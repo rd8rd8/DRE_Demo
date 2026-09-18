@@ -6,21 +6,6 @@ import re
 
 from playwright.sync_api import sync_playwright
 
-
-# ---------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------
-
-URL = (
-    "https://eur-lex.europa.eu/legal-content/PT/TXT/"
-    "?uri=CELEX:32022L2555"
-)
-
-OUTPUT_DIR = Path("data/raw/EU-DIR-2022-2555")
-
-CELEX = "32022L2555"
-
-
 # ---------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------
@@ -243,7 +228,7 @@ def parse_document(
 # MAIN
 # ---------------------------------------------------------
 
-def main():
+def main_eurlex(URL,OUTPUT_DIR,CELEX):
 
     html, text = download_eurlex()
 
@@ -282,5 +267,3 @@ def main():
     )
 
 
-if __name__ == "__main__":
-    main()
