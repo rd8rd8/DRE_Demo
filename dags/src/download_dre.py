@@ -29,41 +29,92 @@ def download_html(html_url: str, output_dir: Path) -> dict:
     print("Downloading and rendering HTML with Playwright...")
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+
+        browser = playwright.chromium.launch(
+            headless=True
+        )
 
         try:
             page = browser.new_page()
+
             page.goto(
                 html_url,
                 wait_until="domcontentloaded",
                 timeout=60_000,
             )
 
+            # -------------------------------------------------
+            # WAIT FOR THE ACTUAL LEGAL CONTENT
+            # -------------------------------------------------
+
             page.wait_for_function(
                 """
                 () => {
-                    const container = document.querySelector('#reactContainer');
-                    return container && container.innerText.length > 500;
+
+                    const selectors = [
+                        "[id$='InjectHTMLWrapper']",
+                        ".texto.int-links",
+                        "#ConteudoDiploma",
+                        "[data-block='Legislacao_Conteudos.Conteudo_Det_Diploma']"
+                    ];
+
+                    for (const selector of selectors) {
+
+                        const elements =
+                            document.querySelectorAll(selector);
+
+                        for (const element of elements) {
+
+                            const text =
+                                (element.innerText || "").trim();
+
+                            const paragraphs =
+                                element.querySelectorAll("p");
+
+                            if (
+                                paragraphs.length >= 3 &&
+                                /Artigo\\s+\\d+/i.test(text)
+                            ) {
+                                return true;
+                            }
+                        }
+                    }
+
+                    return false;
                 }
                 """,
                 timeout=60_000,
             )
 
+            # Only now is the page considered ready
             html = page.content()
+
         finally:
             browser.close()
 
     html_bytes = html.encode("utf-8")
-    output_path = output_dir / "original.html"
-    output_path.write_text(html, encoding="utf-8")
 
-    print(f"HTML saved to: {output_path}")
+    output_path = (
+        output_dir
+        / "original.html"
+    )
+
+    output_path.write_text(
+        html,
+        encoding="utf-8",
+    )
+
+    print(
+        f"HTML saved to: {output_path}"
+    )
 
     return {
         "url": html_url,
         "extraction_method": "playwright",
         "size_bytes": len(html_bytes),
-        "sha256": calculate_sha256(html_bytes),
+        "sha256": calculate_sha256(
+            html_bytes
+        ),
     }
 
 
