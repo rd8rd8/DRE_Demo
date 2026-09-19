@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import re
 from copy import deepcopy
@@ -9,7 +8,23 @@ from typing import Any, Optional
 
 from bs4 import BeautifulSoup, Tag
 
-from legal_schema import Annex, Article, HierarchyNode, LegalDocument, Relationship
+try:
+    from dags.src.legal_schema import (
+        Annex,
+        Article,
+        HierarchyNode,
+        LegalDocument,
+        Relationship,
+    )
+except ModuleNotFoundError:
+    # Allows direct execution when dags/src is the active Python path.
+    from legal_schema import (  # type: ignore[no-redef]
+        Annex,
+        Article,
+        HierarchyNode,
+        LegalDocument,
+        Relationship,
+    )
 
 
 SPACE_RE = re.compile(r"\s+")
@@ -438,44 +453,33 @@ def parse_file(input_path: Path, output_path: Optional[Path] = None) -> dict[str
 
 
 # ---------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------
-
-INPUT_PATH = Path(
-    "data/raw/PT-DL-125-2025/original.html"
-)
-
-OUTPUT_PATH = Path(
-    "data/processed/PT-DL-125-2025.json"
-)
-
-
-# ---------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------
 
-def main() -> None:
+def main_dre_parser(
+    input_path: str | Path,
+    output_path: str | Path,
+) -> dict[str, Any]:
+    """Parse a downloaded DRE HTML file and save the structured JSON."""
 
-    data = parse_file(
-        INPUT_PATH,
-        OUTPUT_PATH
-    )
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+
+    if not input_path.is_file():
+        raise FileNotFoundError(
+            f"DRE HTML file not found: {input_path}"
+        )
+
+    data = parse_file(input_path, output_path)
 
     print("\nDRE document parsed successfully.\n")
+    print(json.dumps({
+        "document_id": data["document"]["document_id"],
+        "title": data["document"]["title"],
+        "articles": len(data["articles"]),
+        "annexes": len(data["annexes"]),
+        "relationships": len(data["relationships"]),
+        "output": str(output_path),
+    }, ensure_ascii=False, indent=2))
 
-    print(json.dumps(
-        {
-            "document_id": data["document"]["document_id"],
-            "title": data["document"]["title"],
-            "articles": len(data["articles"]),
-            "annexes": len(data["annexes"]),
-            "relationships": len(data["relationships"]),
-            "output": str(OUTPUT_PATH)
-        },
-        ensure_ascii=False,
-        indent=2
-    ))
-
-
-if __name__ == "__main__":
-    main()
+    return data
