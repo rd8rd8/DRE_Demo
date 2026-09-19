@@ -142,54 +142,6 @@ def run_download_html(
         return future.result()
 
 
-# ---------------------------------------------------------
-# PDF
-# ---------------------------------------------------------
-
-def download_pdf(
-    pdf_url: str,
-    output_dir: Path
-):
-
-    print("Downloading PDF...")
-
-    response = download(
-        pdf_url
-    )
-
-    pdf = response.content
-
-    if not pdf.startswith(b"%PDF"):
-        raise ValueError(
-            "Downloaded content does not "
-            "appear to be a PDF."
-        )
-
-    output_file = (
-        output_dir /
-        "original.pdf"
-    )
-
-    output_file.write_bytes(
-        pdf
-    )
-
-    print(
-        f"PDF saved to: {output_file}"
-    )
-
-    return {
-        "url": pdf_url,
-        "extraction_method": "requests",
-        "content_type":
-            response.headers.get(
-                "Content-Type"
-            ),
-        "size_bytes": len(pdf),
-        "sha256":
-            calculate_sha256(pdf)
-    }
-
 
 # ---------------------------------------------------------
 # HTML INSPECTION
@@ -252,7 +204,6 @@ def inspect_html(
 
 def main_dre(
     HTML_URL,
-    PDF_URL,
     OUTPUT_DIR
 ):
 
@@ -269,19 +220,10 @@ def main_dre(
         )
     )
 
-    # PDF
-    pdf_metadata = None
-
-    if PDF_URL:
-
-        pdf_metadata = download_pdf(
-            PDF_URL,
-            OUTPUT_DIR
-        )
+    
 
     metadata = {
-        "html": html_metadata,
-        "pdf": pdf_metadata
+        "html": html_metadata
     }
 
     metadata_path = (

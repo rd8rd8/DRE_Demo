@@ -1,13 +1,17 @@
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs, unquote, urljoin
+from urllib.parse import urlparse, parse_qs, unquote
 
 import asyncio
 import sys
 import re
+import json
 import requests
 
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
+from playwright.async_api import (
+    async_playwright,
+    TimeoutError as PlaywrightTimeoutError
+)
 from concurrent.futures import ThreadPoolExecutor
 
 from dags.src.download_dre import main_dre
@@ -40,12 +44,14 @@ def detect_source(url: str) -> str:
 # DRE - GET RENDERED HTML
 # =========================================================
 
-async def _get_dre_html_async(
-    url: str
-) -> str:
+async def _get_dre_html_async(url: str) -> str:
     """
-    Open a DRE page with Playwright and return
-    the rendered HTML.
+    Open a DRE page with Playwright and return the rendered HTML.
+
+    Important:
+    DRE injects part of its legal metadata after the main page content
+    is already visible. Therefore we wait not only for the React content,
+    but also for the PDF ELI metadata when available.
     """
 
     async with async_playwright() as p:
@@ -64,13 +70,12 @@ async def _get_dre_html_async(
                 timeout=60_000
             )
 
+            # Wait until the legislation text is actually rendered.
             await page.wait_for_function(
                 """
                 () => {
                     const container =
-                        document.querySelector(
-                            '#reactContainer'
-                        );
+                        document.querySelector('#reactContainer');
 
                     return container &&
                            container.innerText.length > 500;
@@ -79,37 +84,54 @@ async def _get_dre_html_async(
                 timeout=60_000
             )
 
-            html = await page.content()
+            # DRE injects the ELI format metadata later.
+            # Do not fail here if it is not injected: resolve_dre()
+            # has a fallback that constructs the official ELI PDF URL
+            # from the document metadata.
+            try:
+                await page.wait_for_function(
+                    """
+                    () => {
+                        return Array.from(
+                            document.querySelectorAll('[about]')
+                        ).some(el => {
+                            const value =
+                                el.getAttribute('about') || '';
 
-            return html
+                            return (
+                                value.includes('data.dre.pt/eli/') &&
+                                /\\/pt\\/pdf\\/?$/.test(value)
+                            );
+                        });
+                    }
+                    """,
+                    timeout=15_000
+                )
+
+            except PlaywrightTimeoutError:
+                pass
+
+            return await page.content()
 
         finally:
 
             await browser.close()
 
 
-def get_dre_html(
-    url: str
-) -> str:
+def get_dre_html(url: str) -> str:
     """
-    Synchronous wrapper around the asynchronous
-    Playwright function.
+    Synchronous wrapper around Playwright.
 
-    Uses a separate thread so it also works
-    inside a VS Code / Jupyter notebook.
+    Runs in a separate thread so that main(...) can be called
+    directly inside VS Code / Jupyter notebooks.
     """
 
     def worker():
 
-        # Windows requires a Proactor event loop
-        # because Playwright launches subprocesses.
         if sys.platform.startswith("win"):
 
             loop = asyncio.ProactorEventLoop()
-
-            asyncio.set_event_loop(
-                loop
-            )
+            asyncio.set_event_loop(loop)
 
             try:
 
@@ -121,7 +143,6 @@ def get_dre_html(
 
                 loop.close()
 
-        # Linux / macOS
         return asyncio.run(
             _get_dre_html_async(url)
         )
@@ -130,51 +151,279 @@ def get_dre_html(
         max_workers=1
     ) as executor:
 
-        future = executor.submit(
+        return executor.submit(
             worker
+        ).result()
+
+
+# =========================================================
+# DRE HELPERS
+# =========================================================
+
+def _find_dre_pdf_in_eli_metadata(
+    soup: BeautifulSoup
+) -> str | None:
+    """
+    Find the official PDF representation in DRE ELI metadata.
+    """
+
+    # Preferred structure.
+    pdf_container = soup.find(
+        id="eli-legal-format-pdf"
+    )
+
+    if pdf_container:
+
+        pdf_format = pdf_container.find(
+            attrs={
+                "typeof": "eli:Format",
+                "about": True
+            }
         )
 
-        return future.result()
+        if pdf_format:
+
+            value = pdf_format.get(
+                "about"
+            )
+
+            if value:
+                return value
+
+    # Generic fallback: independent of the surrounding container ID.
+    for tag in soup.find_all(
+        attrs={
+            "about": True
+        }
+    ):
+
+        value = tag.get(
+            "about"
+        )
+
+        if (
+            isinstance(value, str)
+            and "data.dre.pt/eli/" in value
+            and re.search(
+                r"/pt/pdf/?$",
+                value
+            )
+        ):
+
+            return value
+
+    return None
+
+
+def _get_dre_publication_date(
+    soup: BeautifulSoup
+) -> str | None:
+    """
+    Read datePublished from DRE JSON-LD metadata.
+    """
+
+    for script in soup.find_all(
+        "script",
+        attrs={
+            "type": "application/ld+json"
+        }
+    ):
+
+        raw = script.string or script.get_text(
+            strip=True
+        )
+
+        if not raw:
+            continue
+
+        try:
+            data = json.loads(raw)
+
+        except json.JSONDecodeError:
+            continue
+
+        documents = (
+            data
+            if isinstance(data, list)
+            else [data]
+        )
+
+        for document in documents:
+
+            if not isinstance(
+                document,
+                dict
+            ):
+                continue
+
+            date_published = document.get(
+                "datePublished"
+            )
+
+            if date_published:
+                return str(
+                    date_published
+                )[:10]
+
+    # Secondary fallback for the visible DRE publication date.
+    text = soup.get_text(
+        " ",
+        strip=True
+    )
+
+    match = re.search(
+        r"Data de Publicação:\s*"
+        r"(\d{4}-\d{2}-\d{2})",
+        text
+    )
+
+    if match:
+        return match.group(1)
+
+    return None
+
+
+def _build_dre_eli_pdf_url(
+    document_type: str,
+    number: str,
+    year: str,
+    publication_date: str
+) -> str | None:
+    """
+    Construct the official DRE ELI PDF representation.
+
+    Used only if the ELI PDF metadata was not present
+    in the rendered DOM.
+    """
+
+    eli_type_map = {
+        "decreto-lei": "dec-lei",
+        "lei": "lei",
+        "portaria": "port",
+        "decreto-regulamentar": "dec-reg",
+        "decreto": "dec",
+        "resolucao-do-conselho-de-ministros": "resolconsmin",
+        "resolucao-da-assembleia-da-republica": "resolassembleia"
+    }
+
+    eli_type = eli_type_map.get(
+        document_type
+    )
+
+    if not eli_type:
+        return None
+
+    date_match = re.fullmatch(
+        r"(\d{4})-(\d{2})-(\d{2})",
+        publication_date
+    )
+
+    if not date_match:
+        return None
+
+    date_year = date_match.group(1)
+    month = date_match.group(2)
+    day = date_match.group(3)
+
+    # The year in the publication date must agree with
+    # the year contained in the document URL.
+    if date_year != year:
+        return None
+
+    eli_number = number.lower()
+
+    return (
+        "https://data.dre.pt/eli/"
+        f"{eli_type}/"
+        f"{eli_number}/"
+        f"{year}/"
+        f"{month}/"
+        f"{day}/"
+        "p/dre/pt/pdf"
+    )
 
 
 # =========================================================
 # DRE
 # =========================================================
 
-def resolve_dre(
-    url: str
-):
+def resolve_dre(url: str):
     """
-    Convert a DRE URL into the arguments required
-    by main_dre():
+    Convert a DRE URL into the exact arguments expected by:
 
-        HTML_URL
-        PDF_URL
-        OUTPUT_DIR
+        main_dre(
+            HTML_URL,
+            OUTPUT_DIR
+        )
+
+    main_dre itself is not modified.
     """
 
-    path = urlparse(url).path
-    print(path)
-    # Example:
+    parsed = urlparse(
+        url
+    )
+
+    parts = [
+        part
+        for part in parsed.path.split("/")
+        if part
+    ]
+
+    # Expected example:
     #
     # /dr/detalhe/decreto-lei/125-2025-962603401
 
-    match = re.search(
-        r"/detalhe/([^/]+)/(\d+)-(\d{4})-",
-        path
-    )
+    try:
 
-    if not match:
+        detail_index = parts.index(
+            "detalhe"
+        )
+
+        document_type = parts[
+            detail_index + 1
+        ]
+
+        document_slug = parts[
+            detail_index + 2
+        ]
+
+    except (
+        ValueError,
+        IndexError
+    ):
 
         raise ValueError(
             "Could not understand DRE URL."
         )
 
-    document_type = match.group(1)
-    number = match.group(2)
-    year = match.group(3)
+    # Split from the right so document numbers containing
+    # a hyphen can also be handled.
+    try:
 
-    # Friendly document codes
+        number, year, _internal_id = (
+            document_slug.rsplit(
+                "-",
+                2
+            )
+        )
+
+    except ValueError:
+
+        raise ValueError(
+            "Could not extract number/year "
+            "from DRE URL."
+        )
+
+    if (
+        not year.isdigit()
+        or len(year) != 4
+    ):
+
+        raise ValueError(
+            "Could not identify the year "
+            "in the DRE URL."
+        )
+
     type_map = {
         "decreto-lei": "DL",
         "lei": "LEI",
@@ -188,7 +437,9 @@ def resolve_dre(
     )
 
     OUTPUT_DIR = Path(
-        f"data/raw/PT-{type_code}-{number}-{year}"
+        f"data/raw/"
+        f"PT-{type_code}-"
+        f"{number.upper()}-{year}"
     )
 
     print(
@@ -196,7 +447,7 @@ def resolve_dre(
     )
 
     # -----------------------------------------------------
-    # Get rendered HTML
+    # Render DRE page
     # -----------------------------------------------------
 
     html = get_dre_html(
@@ -208,37 +459,12 @@ def resolve_dre(
         "html.parser"
     )
 
-    # -----------------------------------------------------
-    # Find PDF
-    # -----------------------------------------------------
 
-    PDF_URL = None
 
-    for link in soup.find_all(
-        "a",
-        href=True
-    ):
 
-        href = urljoin(
-            url,
-            link["href"]
-        )
-
-        if ".pdf" in href.lower():
-
-            PDF_URL = href
-
-            break
-
-    if not PDF_URL:
-
-        raise ValueError(
-            "Could not find DRE PDF."
-        )
 
     return {
         "HTML_URL": url,
-        "PDF_URL": PDF_URL,
         "OUTPUT_DIR": OUTPUT_DIR
     }
 
@@ -247,16 +473,17 @@ def resolve_dre(
 # EUR-LEX
 # =========================================================
 
-def resolve_eurlex(
-    url: str
-):
+def resolve_eurlex(url: str):
     """
-    Convert a EUR-Lex URL into the arguments
-    required by main_eurlex():
+    Convert a EUR-Lex URL into the arguments expected by:
 
-        URL
-        OUTPUT_DIR
-        CELEX
+        main_eurlex(
+            URL,
+            OUTPUT_DIR,
+            CELEX
+        )
+
+    main_eurlex itself is not modified.
     """
 
     parsed = urlparse(
@@ -267,16 +494,16 @@ def resolve_eurlex(
         parsed.query
     )
 
-    # -----------------------------------------------------
-    # Try CELEX from URL
-    # -----------------------------------------------------
-
     uri = query.get(
         "uri",
         [None]
     )[0]
 
     CELEX = None
+
+    # -----------------------------------------------------
+    # Try CELEX directly from URL
+    # -----------------------------------------------------
 
     if uri:
 
@@ -294,7 +521,7 @@ def resolve_eurlex(
             )[1]
 
     # -----------------------------------------------------
-    # If CELEX isn't in URL, read EUR-Lex metadata
+    # Otherwise read CELEX from EUR-Lex metadata
     # -----------------------------------------------------
 
     if not CELEX:
@@ -339,10 +566,6 @@ def resolve_eurlex(
             "CELEX identifier is empty."
         )
 
-    # -----------------------------------------------------
-    # Output directory
-    # -----------------------------------------------------
-
     OUTPUT_DIR = Path(
         f"data/raw/EU-{CELEX}"
     )
@@ -358,13 +581,11 @@ def resolve_eurlex(
 # MAIN ENGINE
 # =========================================================
 
-def main(
-    url: str
-):
+def main(url: str):
     """
     Main entry point.
 
-    The user only provides the legislation URL.
+    Only a legislation URL is required.
     """
 
     source = detect_source(
@@ -394,22 +615,17 @@ def main(
             f"{args['HTML_URL']}"
         )
 
-        print(
-            f"PDF_URL: "
-            f"{args['PDF_URL']}"
-        )
 
         print(
             f"OUTPUT_DIR: "
             f"{args['OUTPUT_DIR']}"
         )
-
+        print()
         return main_dre(
             HTML_URL=args["HTML_URL"],
-            PDF_URL=args["PDF_URL"],
             OUTPUT_DIR=args["OUTPUT_DIR"]
         )
-
+ 
     # =====================================================
     # EUR-LEX
     # =====================================================
@@ -438,7 +654,7 @@ def main(
             f"OUTPUT_DIR: "
             f"{args['OUTPUT_DIR']}"
         )
-
+        
         return main_eurlex(
             URL=args["URL"],
             OUTPUT_DIR=args["OUTPUT_DIR"],

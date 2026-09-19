@@ -83,7 +83,7 @@ def extract_eli(text: str) -> str | None:
 # EUR-LEX DOWNLOAD
 # ---------------------------------------------------------
 
-def download_eurlex():
+def download_eurlex(URL:str, OUTPUT_DIR:Path):
 
     OUTPUT_DIR.mkdir(
         parents=True,
@@ -106,7 +106,6 @@ def download_eurlex():
             timeout=60_000
         )
 
-        # Wait until the actual NIS2 document is visible
         page.get_by_text(
             "Diretiva (UE) 2022/2555",
             exact=False
@@ -116,15 +115,7 @@ def download_eurlex():
 
         print("EUR-Lex document loaded.")
 
-        # -------------------------------------------------
-        # RAW HTML
-        # -------------------------------------------------
-
         html = page.content()
-
-        html_bytes = html.encode(
-            "utf-8"
-        )
 
         html_file = (
             OUTPUT_DIR /
@@ -136,23 +127,7 @@ def download_eurlex():
             encoding="utf-8"
         )
 
-        # -------------------------------------------------
-        # RAW VISIBLE TEXT
-        # -------------------------------------------------
-
-        text = page.locator(
-            "body"
-        ).inner_text()
-
-        text_file = (
-            OUTPUT_DIR /
-            "original.txt"
-        )
-
-        text_file.write_text(
-            text,
-            encoding="utf-8"
-        )
+        
 
         browser.close()
 
@@ -165,8 +140,6 @@ def download_eurlex():
     )
 
     return html, text
-
-
 # ---------------------------------------------------------
 # PARSE DOCUMENT
 # ---------------------------------------------------------
@@ -229,9 +202,12 @@ def parse_document(
 # ---------------------------------------------------------
 
 def main_eurlex(URL,OUTPUT_DIR,CELEX):
-
-    html, text = download_eurlex()
-
+    OUTPUT_DIR.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+    html, text = download_eurlex(URL,download_eurlex)
+    
     document = parse_document(
         html,
         text
