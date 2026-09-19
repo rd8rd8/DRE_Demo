@@ -15,7 +15,7 @@ from playwright.async_api import (
 from concurrent.futures import ThreadPoolExecutor
 
 from dags.src.download_dre import main_dre
-from dags.src.download_eurlex import main_eurlex
+
 
 
 # =========================================================
@@ -31,9 +31,6 @@ def detect_source(url: str) -> str:
 
     if "diariodarepublica.pt" in domain:
         return "dre"
-
-    if "eur-lex.europa.eu" in domain:
-        return "eurlex"
 
     raise ValueError(
         f"Unsupported source: {domain}"
@@ -469,113 +466,6 @@ def resolve_dre(url: str):
     }
 
 
-# =========================================================
-# EUR-LEX
-# =========================================================
-
-def resolve_eurlex(url: str):
-    """
-    Convert a EUR-Lex URL into the arguments expected by:
-
-        main_eurlex(
-            URL,
-            OUTPUT_DIR,
-            CELEX
-        )
-
-    main_eurlex itself is not modified.
-    """
-
-    parsed = urlparse(
-        url
-    )
-
-    query = parse_qs(
-        parsed.query
-    )
-
-    uri = query.get(
-        "uri",
-        [None]
-    )[0]
-
-    CELEX = None
-
-    # -----------------------------------------------------
-    # Try CELEX directly from URL
-    # -----------------------------------------------------
-
-    if uri:
-
-        uri = unquote(
-            uri
-        )
-
-        if uri.upper().startswith(
-            "CELEX:"
-        ):
-
-            CELEX = uri.split(
-                ":",
-                1
-            )[1]
-
-    # -----------------------------------------------------
-    # Otherwise read CELEX from EUR-Lex metadata
-    # -----------------------------------------------------
-
-    if not CELEX:
-
-        print(
-            "CELEX not found in URL. "
-            "Reading EUR-Lex metadata..."
-        )
-
-        response = requests.get(
-            url,
-            timeout=30
-        )
-
-        response.raise_for_status()
-
-        soup = BeautifulSoup(
-            response.text,
-            "html.parser"
-        )
-
-        celex_tag = soup.find(
-            "meta",
-            attrs={
-                "property": "eli:id_local"
-            }
-        )
-
-        if not celex_tag:
-
-            raise ValueError(
-                "Could not identify CELEX."
-            )
-
-        CELEX = celex_tag.get(
-            "content"
-        )
-
-    if not CELEX:
-
-        raise ValueError(
-            "CELEX identifier is empty."
-        )
-
-    OUTPUT_DIR = Path(
-        f"data/raw/EU-{CELEX}"
-    )
-
-    return {
-        "URL": url,
-        "OUTPUT_DIR": OUTPUT_DIR,
-        "CELEX": CELEX
-    }
-
 
 # =========================================================
 # MAIN ENGINE
@@ -626,37 +516,4 @@ def main(url: str):
             OUTPUT_DIR=args["OUTPUT_DIR"]
         )
  
-    # =====================================================
-    # EUR-LEX
-    # =====================================================
-
-    if source == "eurlex":
-
-        args = resolve_eurlex(
-            url
-        )
-
-        print(
-            "\nArguments discovered:"
-        )
-
-        print(
-            f"URL: "
-            f"{args['URL']}"
-        )
-
-        print(
-            f"CELEX: "
-            f"{args['CELEX']}"
-        )
-
-        print(
-            f"OUTPUT_DIR: "
-            f"{args['OUTPUT_DIR']}"
-        )
-        
-        return main_eurlex(
-            URL=args["URL"],
-            OUTPUT_DIR=args["OUTPUT_DIR"],
-            CELEX=args["CELEX"]
-        )
+    
