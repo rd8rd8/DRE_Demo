@@ -12,7 +12,7 @@ import traceback
 
 import streamlit as st
 
-from dags.src.engine import main, resolve_dre
+from scripts.src.engine import main, resolve_dre
 
 
 st.set_page_config(
@@ -32,8 +32,7 @@ with st.form("legislation_form"):
     url = st.text_input(
         "Ligação da legislação",
         placeholder=(
-            "https://diariodarepublica.pt/dr/detalhe/"
-            "decreto-lei/125-2025-962603401"
+            "Ligação para o Diário da República"
         ),
     )
     submitted = st.form_submit_button(

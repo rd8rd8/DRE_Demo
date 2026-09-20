@@ -1,8 +1,8 @@
 from pathlib import Path
 from urllib.parse import urlparse
 
-from dags.src.download_dre import main_dre
-from dags.src.dre_parser import main_dre_parser
+from scripts.src.download_dre import main_dre
+from scripts.src.dre_parser import main_dre_parser
 
 
 # =========================================================

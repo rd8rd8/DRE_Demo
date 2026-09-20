@@ -9,7 +9,7 @@ from typing import Any, Optional
 from bs4 import BeautifulSoup, Tag
 
 try:
-    from dags.src.legal_schema import (
+    from scripts.src.legal_schema import (
         Annex,
         Article,
         HierarchyNode,
@@ -17,7 +17,7 @@ try:
         Relationship,
     )
 except ModuleNotFoundError:
-    # Allows direct execution when dags/src is the active Python path.
+    # Allows direct execution when scripts/src is the active Python path.
     from legal_schema import (  # type: ignore[no-redef]
         Annex,
         Article,
