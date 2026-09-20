@@ -1,3 +1,7 @@
 logs/
 *.pyc
 data/
+regulatory_demo_refactor.zip
+test.ipynb
+scripts/src/old/download_eurlex.py
+scripts/src/old/eurlex_parser.py
